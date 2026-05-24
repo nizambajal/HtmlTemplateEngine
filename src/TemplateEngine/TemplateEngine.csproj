@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <RootNamespace>TemplateEngine</RootNamespace>
+    <AssemblyName>TemplateEngine</AssemblyName>
+    <Version>1.0.0</Version>
+    <Authors>Nizamuddien TI(nizambajal@gmail.com)</Authors>
+    <Description>Production-grade C# HTML template engine similar to Handlebars</Description>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+	  <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+  </PropertyGroup>
+</Project>
