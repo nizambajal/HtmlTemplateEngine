@@ -34,9 +34,12 @@ public sealed class TemplateParser
 
     private void ParseChildren(List<AstNode> children, Func<Token, bool> endCondition)
     {
-        while (!endCondition(Current()))
+        while (true)
         {
             if (Current().Type == TokenType.EndOfFile) break;
+            // Directives are wrapped in {{ }}, so peek through ExpressionOpen
+            var lookahead = Current().Type == TokenType.ExpressionOpen ? PeekAt(1) : Current();
+            if (endCondition(lookahead)) break;
 
             var node = ParseNext();
             if (node != null) children.Add(node);
@@ -47,18 +50,32 @@ public sealed class TemplateParser
     {
         var tok = Current();
 
-        return tok.Type switch
+        if (tok.Type == TokenType.Text) return ParseText();
+
+        // {{ ... }} — peek at the token after {{ to decide if it is a directive or value expression
+        if (tok.Type == TokenType.ExpressionOpen)
         {
-            TokenType.Text => ParseText(),
-            TokenType.ExpressionOpen => ParseExpression(raw: false),
-            TokenType.RawExpressionOpen => ParseExpression(raw: true),
-            TokenType.If => ParseIf(),
-            TokenType.Foreach => ParseForeach(),
-            // These are consumed by their parent and should not appear here
-            TokenType.Else or TokenType.ElseIf or TokenType.EndIf or TokenType.EndForeach =>
-                throw new TemplateSyntaxException($"Unexpected '{tok.Value}'", tok.Line, tok.Column, tok.Value),
-            _ => throw new TemplateSyntaxException($"Unexpected token {tok.Type} '{tok.Value}'", tok.Line, tok.Column, tok.Value)
-        };
+            var inner = PeekAt(1);
+            return inner.Type switch
+            {
+                TokenType.If => ParseIfBlock(),
+                TokenType.Foreach => ParseForeachBlock(),
+                TokenType.EndIf or TokenType.EndForeach or TokenType.Else or TokenType.ElseIf =>
+                    throw new TemplateSyntaxException($"Unexpected '{{inner.Value}}'", inner.Line, inner.Column, inner.Value),
+                _ => ParseExpression(raw: false)
+            };
+        }
+
+        if (tok.Type == TokenType.RawExpressionOpen) return ParseExpression(raw: true);
+
+        throw new TemplateSyntaxException($"Unexpected token {tok.Type} '{tok.Value}'", tok.Line, tok.Column, tok.Value);
+    }
+
+    /// <summary>Peeks at the token at position _pos+offset without consuming.</summary>
+    private Token PeekAt(int offset)
+    {
+        var idx = _pos + offset;
+        return idx < _tokens.Count ? _tokens[idx] : _tokens[^1];
     }
 
     // ── Text ──────────────────────────────────────────────────────────────────
@@ -102,8 +119,9 @@ public sealed class TemplateParser
 
     // ── If blocks ─────────────────────────────────────────────────────────────
 
-    private IfNode ParseIf()
+    private IfNode ParseIfBlock()
     {
+        Consume(TokenType.ExpressionOpen);
         var ifTok = Consume(TokenType.If);
         var cond = ParseExpressionAst();
         Consume(TokenType.ExpressionClose);
@@ -119,8 +137,9 @@ public sealed class TemplateParser
         ParseChildren(node.ThenBody, t => t.Type is TokenType.Else or TokenType.ElseIf or TokenType.EndIf or TokenType.EndOfFile);
 
         // Handle else-if chains
-        while (Current().Type == TokenType.ElseIf)
+        while (Current().Type == TokenType.ExpressionOpen && PeekAt(1).Type == TokenType.ElseIf)
         {
+            Consume(TokenType.ExpressionOpen);
             var elseIfTok = Consume(TokenType.ElseIf);
             var elseIfCond = ParseExpressionAst();
             Consume(TokenType.ExpressionClose);
@@ -130,14 +149,16 @@ public sealed class TemplateParser
         }
 
         // Optional else
-        if (Current().Type == TokenType.Else)
+        if (Current().Type == TokenType.ExpressionOpen && PeekAt(1).Type == TokenType.Else)
         {
+            Consume(TokenType.ExpressionOpen);
             Consume(TokenType.Else);
             Consume(TokenType.ExpressionClose);
             node.ElseBody = new List<AstNode>();
             ParseChildren(node.ElseBody, t => t.Type is TokenType.EndIf or TokenType.EndOfFile);
         }
 
+        Consume(TokenType.ExpressionOpen);
         Consume(TokenType.EndIf);
         Consume(TokenType.ExpressionClose);
         return node;
@@ -145,12 +166,15 @@ public sealed class TemplateParser
 
     // ── Foreach blocks ────────────────────────────────────────────────────────
 
-    private ForeachNode ParseForeach()
+    private ForeachNode ParseForeachBlock()
     {
+        Consume(TokenType.ExpressionOpen);
         var forTok = Consume(TokenType.Foreach);
 
-        // Read collection identifier
-        var collectionTok = Consume(TokenType.Identifier);
+        // Read collection path — the lexer may emit "order.Items" as one dotted
+        // Identifier token, or (if re-lexed) as separate Identifier + Dot + Identifier
+        // tokens. ConsumeCollectionPath handles both cases.
+        var collectionPath = ConsumeCollectionPath();
 
         // Optional "as alias"
         string? alias = null;
@@ -164,7 +188,7 @@ public sealed class TemplateParser
 
         var node = new ForeachNode
         {
-            Collection = collectionTok.Value,
+            Collection = collectionPath,
             Alias = alias,
             Line = forTok.Line,
             Column = forTok.Column
@@ -172,9 +196,41 @@ public sealed class TemplateParser
 
         ParseChildren(node.Body, t => t.Type is TokenType.EndForeach or TokenType.EndOfFile);
 
+        Consume(TokenType.ExpressionOpen);
         Consume(TokenType.EndForeach);
         Consume(TokenType.ExpressionClose);
         return node;
+    }
+
+    /// <summary>
+    /// Reads a (possibly dotted) collection path from the token stream.
+    /// Handles both single-token "order.Items" and multi-token "order · . · Items" forms.
+    /// Stops before <c>as</c>, <c>}}</c>, or EOF.
+    /// </summary>
+    private string ConsumeCollectionPath()
+    {
+        var tok = Current();
+        if (tok.Type != TokenType.Identifier)
+            throw new TemplateSyntaxException(
+                $"Expected collection name in foreach, got '{tok.Value}'",
+                tok.Line, tok.Column, tok.Value);
+
+        // The lexer already combines dotted paths into one Identifier token
+        // (e.g. "category.Products" is emitted as a single token).
+        // But defensively stitch together Identifier (Dot Identifier)* sequences too.
+        var path = new System.Text.StringBuilder(Advance().Value);
+
+        while (Current().Type == TokenType.Dot)
+        {
+            Advance(); // consume dot
+            if (Current().Type != TokenType.Identifier)
+                throw new TemplateSyntaxException(
+                    "Expected identifier after '.' in collection path",
+                    Current().Line, Current().Column, Current().Value);
+            path.Append('.').Append(Advance().Value);
+        }
+
+        return path.ToString();
     }
 
     // ── Expression AST (recursive descent) ───────────────────────────────────
@@ -319,8 +375,9 @@ public sealed class TemplateParser
                     if (Current().Type == TokenType.Comma) Advance();
                 }
                 Consume(TokenType.CloseParen);
-                return new HelperCallExpr { HelperName = tok.Value, Line = tok.Line, Column = tok.Column, Arguments = { } }
-                    .WithArgs(args);
+                var helperExpr = new HelperCallExpr { HelperName = tok.Value, Line = tok.Line, Column = tok.Column };
+                helperExpr.Arguments.AddRange(args);
+                return helperExpr;
             }
 
             return new PropertyExpr { Path = tok.Value, Line = tok.Line, Column = tok.Column };
@@ -348,14 +405,5 @@ public sealed class TemplateParser
                 $"Expected {expected} but found {tok.Type} '{tok.Value}'",
                 tok.Line, tok.Column, tok.Value);
         return Advance();
-    }
-}
-
-internal static class HelperCallExprExtensions
-{
-    public static HelperCallExpr WithArgs(this HelperCallExpr expr, List<ExpressionAst> args)
-    {
-        expr.Arguments.AddRange(args);
-        return expr;
     }
 }
