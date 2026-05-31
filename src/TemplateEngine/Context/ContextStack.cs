@@ -38,38 +38,92 @@ public sealed class ContextFrame
 /// Maintains the stack of context frames during rendering.
 /// Thread-local / instance-per-render — not shared between renders.
 /// </summary>
+//public sealed class ContextStack
+//{
+//    private readonly Stack<ContextFrame> _stack = new();
+
+//    public ContextStack(object? rootModel)
+//    {
+//        _stack.Push(new ContextFrame(rootModel));
+//    }
+
+//    /// <summary>The current (innermost) frame.</summary>
+//    public ContextFrame Current => _stack.Peek();
+
+//    /// <summary>All frames from innermost to outermost.</summary>
+//    public IEnumerable<ContextFrame> Frames => _stack;
+
+//    /// <summary>Total depth of the stack.</summary>
+//    public int Depth => _stack.Count;
+
+//    /// <summary>Pushes a new scope onto the stack.</summary>
+//    public void Push(object? model, string? alias = null, LoopContext? loopMeta = null)
+//        => _stack.Push(new ContextFrame(model, alias, loopMeta));
+
+//    /// <summary>Pops the innermost scope.</summary>
+//    public void Pop() => _stack.Pop();
+
+//    /// <summary>
+//    /// Resolves the model at a given parent-navigation depth.
+//    /// depth=0 means current frame, depth=1 means one level up, etc.
+//    /// </summary>
+//    public ContextFrame? FrameAt(int depth)
+//    {
+//        var frames = _stack.ToArray(); // innermost first
+//        return depth < frames.Length ? frames[depth] : null;
+//    }
+//}
+
 public sealed class ContextStack
 {
-    private readonly Stack<ContextFrame> _stack = new();
+    private readonly List<ContextFrame> _frames = new();
 
     public ContextStack(object? rootModel)
     {
-        _stack.Push(new ContextFrame(rootModel));
+        _frames.Add(
+            new ContextFrame(rootModel));
     }
 
-    /// <summary>The current (innermost) frame.</summary>
-    public ContextFrame Current => _stack.Peek();
+    public ContextFrame Current
+        => _frames[^1];
 
-    /// <summary>All frames from innermost to outermost.</summary>
-    public IEnumerable<ContextFrame> Frames => _stack;
+    public IEnumerable<ContextFrame> Frames
+    {
+        get
+        {
+            for (int i = _frames.Count - 1; i >= 0; i--)
+                yield return _frames[i];
+        }
+    }
 
-    /// <summary>Total depth of the stack.</summary>
-    public int Depth => _stack.Count;
+    public int Depth => _frames.Count;
 
-    /// <summary>Pushes a new scope onto the stack.</summary>
-    public void Push(object? model, string? alias = null, LoopContext? loopMeta = null)
-        => _stack.Push(new ContextFrame(model, alias, loopMeta));
+    public void Push(
+        object? model,
+        string? alias = null,
+        LoopContext? loopMeta = null)
+    {
+        _frames.Add(
+            new ContextFrame(
+                model,
+                alias,
+                loopMeta));
+    }
 
-    /// <summary>Pops the innermost scope.</summary>
-    public void Pop() => _stack.Pop();
+    public void Pop()
+    {
+        _frames.RemoveAt(
+            _frames.Count - 1);
+    }
 
-    /// <summary>
-    /// Resolves the model at a given parent-navigation depth.
-    /// depth=0 means current frame, depth=1 means one level up, etc.
-    /// </summary>
     public ContextFrame? FrameAt(int depth)
     {
-        var frames = _stack.ToArray(); // innermost first
-        return depth < frames.Length ? frames[depth] : null;
+        int index =
+            _frames.Count - 1 - depth;
+
+        if (index < 0)
+            return null;
+
+        return _frames[index];
     }
 }

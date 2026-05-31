@@ -44,87 +44,78 @@ public sealed class ExpressionEvaluator
     {
         var path = expr.Path;
 
-        // Count parent navigation levels (../)
+        // Strip and count parent-navigation prefixes (../)
         int parentLevels = 0;
-        while (path.StartsWith("../"))
+        while (path.StartsWith("../", StringComparison.Ordinal))
         {
             parentLevels++;
             path = path[3..];
         }
 
-        ContextFrame? frame;
+        // Explicit parent navigation — resolve against a specific ancestor frame
         if (parentLevels > 0)
         {
-            frame = ctx.FrameAt(parentLevels);
+            var frame = ctx.FrameAt(parentLevels);
             if (frame == null)
                 throw new PropertyResolutionException(expr.Path, expr.Line, expr.Column,
                     $"Parent context level {parentLevels} does not exist (stack depth {ctx.Depth})");
-        }
-        else
-        {
-            frame = ctx.Current;
+            return _resolver.Resolve(frame.Model, path, expr.Line, expr.Column);
         }
 
-        // Try alias first (for foreach as alias)
-        if (frame.Alias != null && path.StartsWith(frame.Alias, StringComparison.OrdinalIgnoreCase))
+        // Normal resolution: walk frames from innermost outward.
+        // *** Hot path — zero exceptions thrown here ***
+        foreach (var f in ctx.Frames)
         {
-            var afterAlias = path.Length > frame.Alias.Length ? path[(frame.Alias.Length + 1)..] : "";
-            if (string.IsNullOrEmpty(afterAlias))
-                return frame.Model;
-            return _resolver.Resolve(frame.Model, afterAlias, expr.Line, expr.Column);
-        }
-
-        // Walk frames top-to-bottom to find property in current or parent scopes
-        if (parentLevels == 0)
-        {
-            foreach (var f in ctx.Frames)
+            if (f.Alias != null)
             {
-                try
+                // This frame was created by a foreach-as; only match if path starts with alias
+                if (!path.StartsWith(f.Alias, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // "item" (exact alias) → return the model itself
+                if (path.Length == f.Alias.Length)
+                    return f.Model;
+
+                // "item.Name" → resolve "Name" against the item model
+                if (path.Length > f.Alias.Length && path[f.Alias.Length] == '.')
                 {
-                    // Check if alias matches
-                    if (f.Alias != null)
-                    {
-                        if (path.StartsWith(f.Alias, StringComparison.OrdinalIgnoreCase))
-                        {
-                            var afterAlias = path.Length > f.Alias.Length ? path[(f.Alias.Length + 1)..] : "";
-                            if (string.IsNullOrEmpty(afterAlias)) return f.Model;
-                            return _resolver.Resolve(f.Model, afterAlias, expr.Line, expr.Column);
-                        }
-                    }
-                    else
-                    {
-                        return _resolver.Resolve(f.Model, path, expr.Line, expr.Column);
-                    }
+                    var subPath = path[(f.Alias.Length + 1)..];
+                    if (_resolver.TryResolve(f.Model, subPath, out var aliasVal))
+                        return aliasVal;
                 }
-                catch (PropertyResolutionException)
-                {
-                    // Try next frame
-                }
+                // Alias matched prefix but sub-path not found — don't fall through
+                // to parent frames (wrong scope), report the error now.
+                throw new PropertyResolutionException(expr.Path, expr.Line, expr.Column,
+                    $"Could not resolve '{path[(f.Alias.Length + 1)..]}' on alias '{f.Alias}'");
             }
-            throw new PropertyResolutionException(expr.Path, expr.Line, expr.Column, "Could not resolve in any context frame");
+            else
+            {
+                // Non-aliased frame — try to resolve the full path
+                if (_resolver.TryResolve(f.Model, path, out var val))
+                    return val;
+                // Miss on this frame → try parent frame
+            }
         }
 
-        return _resolver.Resolve(frame.Model, path, expr.Line, expr.Column);
+        throw new PropertyResolutionException(expr.Path, expr.Line, expr.Column,
+            "Could not resolve in any context frame");
     }
 
     // ── Loop metadata ─────────────────────────────────────────────────────────
 
     private static object? EvalLoopMeta(LoopMetaExpr expr, ContextStack ctx)
     {
-        // Walk frames to find the innermost one with loop metadata
         foreach (var frame in ctx.Frames)
         {
-            if (frame.LoopMeta != null)
+            if (frame.LoopMeta == null) continue;
+            return expr.MetaName switch
             {
-                return expr.MetaName switch
-                {
-                    "index" => (object)frame.LoopMeta.Index,
-                    "first" => frame.LoopMeta.IsFirst,
-                    "last" => frame.LoopMeta.IsLast,
-                    "count" => frame.LoopMeta.Count,
-                    _ => null
-                };
-            }
+                "index" => (object)frame.LoopMeta.Index,
+                "first" => frame.LoopMeta.IsFirst,
+                "last" => frame.LoopMeta.IsLast,
+                "count" => frame.LoopMeta.Count,
+                _ => null
+            };
         }
         return null;
     }
@@ -133,7 +124,7 @@ public sealed class ExpressionEvaluator
 
     private object? EvalBinary(BinaryExpr expr, ContextStack ctx)
     {
-        // Short-circuit logical operators
+        // Short-circuit logical operators — evaluate right only when needed
         if (expr.Operator == "&&")
         {
             var l = Evaluate(expr.Left, ctx);
@@ -173,7 +164,8 @@ public sealed class ExpressionEvaluator
         return expr.Operator switch
         {
             "!" => !IsTruthy(val),
-            "-" => val is double d ? -d : val is int i ? -i : throw new RenderingException("Cannot negate non-numeric value", expr.Line, expr.Column),
+            "-" => val is double d ? -d : val is int i ? (object)-i
+                   : throw new RenderingException("Cannot negate non-numeric value", expr.Line, expr.Column),
             _ => throw new RenderingException($"Unknown unary operator '{expr.Operator}'", expr.Line, expr.Column)
         };
     }
@@ -181,7 +173,8 @@ public sealed class ExpressionEvaluator
     private object? EvalHelper(HelperCallExpr expr, ContextStack ctx)
     {
         if (!_helpers.TryGetValue(expr.HelperName, out var helper))
-            throw new RenderingException($"Helper '{expr.HelperName}' is not registered", expr.Line, expr.Column, expr.HelperName);
+            throw new RenderingException($"Helper '{expr.HelperName}' is not registered",
+                expr.Line, expr.Column, expr.HelperName);
 
         var arg = expr.Arguments.Count > 0 ? Evaluate(expr.Arguments[0], ctx) : null;
         return helper(arg);
@@ -189,62 +182,55 @@ public sealed class ExpressionEvaluator
 
     // ── Value utilities ───────────────────────────────────────────────────────
 
-    public static bool IsTruthy(object? value)
+    public static bool IsTruthy(object? value) => value switch
     {
-        return value switch
-        {
-            null => false,
-            bool b => b,
-            int i => i != 0,
-            long l => l != 0,
-            double d => d != 0.0,
-            string s => s.Length > 0,
-            ICollection col => col.Count > 0,
-            IEnumerable en => en.Cast<object>().Any(),
-            _ => true
-        };
-    }
+        null => false,
+        bool b => b,
+        int i => i != 0,
+        long l => l != 0,
+        double d => d != 0.0,
+        string s => s.Length > 0,
+        ICollection c => c.Count > 0,
+        IEnumerable e => e.Cast<object>().Any(),
+        _ => true
+    };
 
     private static bool AreEqual(object? a, object? b)
     {
-        if (a == null && b == null) return true;
-        if (a == null || b == null) return false;
-        // Numeric comparison
-        if (TryConvertDouble(a, out var da) && TryConvertDouble(b, out var db))
+        if (a is null && b is null) return true;
+        if (a is null || b is null) return false;
+        if (TryDouble(a, out var da) && TryDouble(b, out var db))
             return Math.Abs(da - db) < 1e-10;
         return a.Equals(b) || a.ToString() == b.ToString();
     }
 
     private static int Compare(object? a, object? b)
     {
-        if (a == null && b == null) return 0;
-        if (a == null) return -1;
-        if (b == null) return 1;
-        if (TryConvertDouble(a, out var da) && TryConvertDouble(b, out var db))
+        if (a is null && b is null) return 0;
+        if (a is null) return -1;
+        if (b is null) return 1;
+        if (TryDouble(a, out var da) && TryDouble(b, out var db))
             return da.CompareTo(db);
         return string.Compare(a.ToString(), b.ToString(), StringComparison.Ordinal);
     }
 
     private static object? Add(object? a, object? b)
     {
-        if (a is string || b is string)
-            return $"{a}{b}";
-        if (TryConvertDouble(a, out var da) && TryConvertDouble(b, out var db))
-            return da + db;
+        if (a is string || b is string) return $"{a}{b}";
+        if (TryDouble(a, out var da) && TryDouble(b, out var db)) return da + db;
         return $"{a}{b}";
     }
 
     private static object? Arithmetic(object? a, object? b, Func<double, double, double> op)
     {
-        if (TryConvertDouble(a, out var da) && TryConvertDouble(b, out var db))
-            return op(da, db);
+        if (TryDouble(a, out var da) && TryDouble(b, out var db)) return op(da, db);
         throw new InvalidOperationException($"Cannot perform arithmetic on '{a}' and '{b}'");
     }
 
-    private static bool TryConvertDouble(object? v, out double d)
+    private static bool TryDouble(object? v, out double d)
     {
         d = 0;
-        if (v == null) return false;
+        if (v is null) return false;
         try { d = Convert.ToDouble(v); return true; } catch { return false; }
     }
 }

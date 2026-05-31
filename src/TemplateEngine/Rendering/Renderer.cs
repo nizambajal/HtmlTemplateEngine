@@ -32,7 +32,8 @@ public sealed class Renderer
     /// <summary>Renders the document AST against the supplied context stack.</summary>
     public string Render(DocumentNode doc, ContextStack ctx)
     {
-        var sb = new StringBuilder(4096);
+        //var sb = new StringBuilder(4096);
+        var sb = new StringBuilder(Math.Min(doc.Children.Count * 64, 32768));
         RenderChildren(doc.Children, ctx, sb);
         return sb.ToString();
     }
@@ -141,11 +142,11 @@ public sealed class Renderer
 
     private void RenderForeach(ForeachNode node, ContextStack ctx, StringBuilder sb)
     {
-        // Resolve the collection from the path
         object? collection;
         try
         {
-            collection = ResolveCollection(node.Collection, ctx, node.Line, node.Column);
+            var expr = new PropertyExpr { Path = node.Collection, Line = node.Line, Column = node.Column };
+            collection = _evaluator.Evaluate(expr, ctx);
         }
         catch (TemplateEngineException) { throw; }
         catch (Exception ex)
@@ -155,35 +156,58 @@ public sealed class Renderer
 
         if (collection == null) return;
 
-        var items = ToObjectList(collection);
-        int count = items.Count;
-
-        for (int i = 0; i < count; i++)
+        // Materialise count without allocating a second list when possible
+        int count = collection switch
         {
-            var loopMeta = new LoopContext { Index = i, Count = count };
-            ctx.Push(items[i], node.Alias, loopMeta);
-            try
+            ICollection c => c.Count,
+            string s => s.Length,
+            _ => -1          // unknown — will be computed lazily
+        };
+
+        if (count == 0) return;
+
+        // Iterate directly over the source — no intermediate List<object?> copy
+        if (count > 0)
+        {
+            int i = 0;
+            foreach (var item in (IEnumerable)collection)
             {
-                RenderChildren(node.Body, ctx, sb);
+                var loopMeta = new LoopContext { Index = i, Count = count };
+                ctx.Push(item, node.Alias, loopMeta);
+                try { RenderChildren(node.Body, ctx, sb); }
+                finally { ctx.Pop(); }
+                i++;
             }
-            finally
+        }
+        else
+        {
+            // Unknown count: materialise once to get total, then iterate
+            var items = MaterialiseList(collection);
+            count = items.Count;
+            for (int i = 0; i < count; i++)
             {
-                ctx.Pop();
+                var loopMeta = new LoopContext { Index = i, Count = count };
+                ctx.Push(items[i], node.Alias, loopMeta);
+                try { RenderChildren(node.Body, ctx, sb); }
+                finally { ctx.Pop(); }
             }
         }
     }
 
-    private object? ResolveCollection(string path, ContextStack ctx, int line, int col)
-    {
-        // Build a temporary property expression and evaluate it
-        var expr = new PropertyExpr { Path = path, Line = line, Column = col };
-        return _evaluator.Evaluate(expr, ctx);
-    }
+    //private static List<object?> MaterialiseList(object collection)
+    //{
+    //    var r = new List<object?>();
+    //    foreach (var item in (IEnumerable)collection) r.Add(item);
+    //    return r;
+    //}
 
-    private static List<object?> ToObjectList(object collection)
+    private static IList MaterialiseList(object collection)
     {
-        if (collection is IEnumerable enumerable)
-            return enumerable.Cast<object?>().ToList();
-        return new List<object?> { collection };
+        if (collection is IList list)
+            return list;
+
+        return ((IEnumerable)collection)
+            .Cast<object>()
+            .ToArray();
     }
 }
