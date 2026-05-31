@@ -19,25 +19,6 @@ A production-grade C# HTML template engine built on a real **Lexer → Parser �
 
 ---
 
-## Project Structure
-
-```
-src/TemplateEngine/
-├── Abstractions/       Base class + IHelperRegistry + IFormatterRegistry
-├── Ast/                AST node types (DocumentNode, IfNode, ForeachNode, …)
-├── Caching/            ConcurrentDictionary-backed parse cache
-├── Context/            ContextStack + LoopContext (foreach metadata)
-├── Evaluator/          ExpressionEvaluator + PropertyResolver (compiled getters)
-├── Exceptions/         TemplateParseException, RenderingException, …
-├── Formatting/         FormatterEngine (built-in + extensible)
-├── Lexer/              TemplateLexer, Token, TokenType
-├── Parser/             Recursive-descent TemplateParser
-├── Rendering/          Renderer (AST walker)
-└── HtmlTemplateEngine.cs   Public API
-```
-
----
-
 ## Quick Start
 
 ```csharp
@@ -281,29 +262,6 @@ Parallel.ForEach(requests, req =>
     var html = engine.Render(req.Model, req.Template);
 });
 ```
-
----
-
-## Running Tests
-
-```bash
-dotnet restore
-dotnet test
-```
-
-Test coverage includes:
-
-- Property binding (simple, nested, deep, dictionary, null-safe, count)
-- Conditional blocks (if, else-if, else, nested, all operators)
-- Foreach loops (alias, no-alias, metadata, nested, parent context, empty/null)
-- Formatting (date, currency, numeric, string case, custom)
-- Expressions (arithmetic, string concat, boolean)
-- Custom helpers and formatters
-- Null handling
-- Error handling and exception types
-- Parse caching
-- Concurrent rendering (thread safety)
-- Performance (large templates, 10 000+ iteration loops)
 
 ---
 
