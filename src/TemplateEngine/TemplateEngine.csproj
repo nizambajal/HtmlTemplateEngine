@@ -1,16 +1,46 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <LangVersion>latest</LangVersion>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <RootNamespace>TemplateEngine</RootNamespace>
-    <AssemblyName>TemplateEngine</AssemblyName>
-    <Version>1.0.0</Version>
-    <Authors>Nizamuddien TI(nizambajal@gmail.com)</Authors>
-    <Description>Production-grade C# HTML template engine similar to Handlebars</Description>
-    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
-	  <Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
-  </PropertyGroup>
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<LangVersion>latest</LangVersion>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+		<RootNamespace>TemplateEngine</RootNamespace>
+		<AssemblyName>TemplateEngine</AssemblyName>
+
+		<AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+		<Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
+
+		<PackageId>Sniz.HtmlTemplateEngine</PackageId>
+		<Version>1.0.0</Version>
+		<Authors>Nizamuddien TI(nizambajal@gmail.com)</Authors>
+		<Company>Sniz</Company>
+		<Description>
+			Lightweight HTML template engine for C# with Handlebars-like syntax,
+			supporting if/else, loops, formatting, metadata, and nested templates.
+		</Description>
+		<PackageTags>
+			html;template;handlebars;templating;engine
+		</PackageTags>
+
+		<RepositoryUrl>
+			https://github.com/nizambajal/HtmlTemplateEngine
+		</RepositoryUrl>
+
+		<PackageProjectUrl>
+			https://github.com/nizambajal/HtmlTemplateEngine
+		</PackageProjectUrl>
+
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<None Include="..\..\README.md"
+			  Pack="true"
+			  PackagePath="README.md" />
+	</ItemGroup>
 </Project>
