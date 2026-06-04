@@ -59,14 +59,19 @@ public sealed class PropertyResolver
 
         foreach (var (segment, nullSafe) in segments)
         {
+            // Current object is null — only continue if THIS segment is null-safe
             if (current == null)
             {
                 if (nullSafe) { value = null; return true; }
                 return false;
             }
 
+            // Resolve this segment; if missing and null-safe, return null gracefully.
             if (!TryResolveSegment(current, segment, out current))
+            {
+                if (nullSafe) { value = null; return true; }
                 return false;
+            }
         }
 
         value = current;
@@ -235,6 +240,17 @@ public sealed class PropertyResolver
         // before calling TryResolve, so they never reach segment parsing.
         while (path.StartsWith("../", StringComparison.Ordinal))
             path = path[3..];
+
+        //
+        // nullSafe=true on a segment means: "if this segment is null OR missing, return null
+        // instead of propagating a resolution failure". The ?. operator guards the segment it
+        // follows — i.e. Customer?.Name means Customer is null-safe, not Name.
+        //
+        // Examples:
+        //   "Customer.Name"         → [("Customer",false), ("Name",false)]
+        //   "Customer?.Name"        → [("Customer",true),  ("Name",false)]
+        //   "A?.B?.C"               → [("A",true), ("B",true), ("C",false)]
+        //   "A.B?.C?.D"             → [("A",false), ("B",true), ("C",true), ("D",false)]
 
         var result = new List<(string, bool)>(4);
         int pos = 0;
