@@ -59,7 +59,19 @@ public sealed class ExpressionEvaluator
             if (frame == null)
                 throw new PropertyResolutionException(expr.Path, expr.Line, expr.Column,
                     $"Parent context level {parentLevels} does not exist (stack depth {ctx.Depth})");
-            return _resolver.Resolve(frame.Model, path, expr.Line, expr.Column);
+
+            // Strip alias prefix if the frame has one (e.g. "../s.Heading" on a frame with alias "s")
+            var resolvedPath = path;
+            if (frame.Alias != null &&
+                resolvedPath.StartsWith(frame.Alias, StringComparison.OrdinalIgnoreCase))
+            {
+                if (resolvedPath.Length == frame.Alias.Length)
+                    return frame.Model;                          // "../alias" — return item itself
+                if (resolvedPath.Length > frame.Alias.Length && resolvedPath[frame.Alias.Length] == '.')
+                    resolvedPath = resolvedPath[(frame.Alias.Length + 1)..]; // "../alias.Prop" → "Prop"
+            }
+
+            return _resolver.Resolve(frame.Model, resolvedPath, expr.Line, expr.Column);
         }
 
         // Normal resolution: walk frames from innermost outward.

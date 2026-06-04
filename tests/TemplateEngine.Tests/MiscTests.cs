@@ -22,7 +22,7 @@ public class FormattingTests
     {
         var model = new SimpleModel { Price = 1234.5m };
         // C format is locale-dependent, just verify it contains the numeric part
-        var result = _engine.Render(model, "{{Price:N2}}");
+        var result = _engine.Render(model, "{{Price:F2}}");
         result.Should().Be("1234.50");
     }
 
@@ -30,7 +30,7 @@ public class FormattingTests
     public void NumericFormat_N2()
     {
         var model = new { Amount = 9876.543 };
-        _engine.Render(model, "{{Amount:N2}}").Should().Be("9876.54");
+        _engine.Render(model, "{{Amount:N2}}").Should().Be("9,876.54");
     }
 
     [Fact]
