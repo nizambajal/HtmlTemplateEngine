@@ -36,6 +36,16 @@
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 
 		<PackageReadmeFile>README.md</PackageReadmeFile>
+
+		<PackageReleaseNotes>
+			Added support for untyped models:
+			- JsonElement
+			- Dictionary&lt;string, object&gt;
+			- ExpandoObject
+
+			Added null-safe property access support.
+			Improved template rendering reliability.
+		</PackageReleaseNotes>
 	</PropertyGroup>
 
 	<ItemGroup>
