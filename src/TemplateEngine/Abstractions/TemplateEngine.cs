@@ -14,6 +14,15 @@ public abstract class TemplateEngine
     public abstract string Render<T>(T model, string template);
 
     /// <summary>
+    /// Renders <paramref name="template"/> against an untyped model.
+    /// Accepts any object including <see cref="System.Text.Json.JsonElement"/>,
+    /// <see cref="System.Dynamic.ExpandoObject"/>, anonymous types, or plain
+    /// <see cref="System.Collections.Generic.Dictionary{TKey,TValue}"/>.
+    /// </summary>
+    public virtual string Render(object model, string template)
+        => Render<object>(model, template);
+
+    /// <summary>
     /// Resolves a single dotted property expression from <paramref name="model"/>.
     /// Example: <c>ResolveProperty(model, "Customer.Name")</c> → <c>"Nizam"</c>
     /// </summary>

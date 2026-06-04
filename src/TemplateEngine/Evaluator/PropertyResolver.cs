@@ -1,47 +1,57 @@
 using System.Collections;
 using System.Collections.Concurrent;
-using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.Json;
+using System.Dynamic;
 using TemplateEngine.Exceptions;
 
 namespace TemplateEngine.Evaluator;
 
 /// <summary>
-/// Resolves a dotted property path against an object model.
-/// Uses compiled delegates cached per (Type, PropertyName) and cached segment
-/// lists per path string — zero repeated reflection or string splitting on
-/// the hot render path.
+/// Resolves a dotted property path against any model type.
+///
+/// Supported model types (tried in order):
+/// <list type="number">
+///   <item><see cref="JsonElement"/> — uses JsonElement.GetProperty / JsonElement.GetInt32 etc.</item>
+///   <item><see cref="IDictionary{TKey,TValue}"/> / <see cref="IDictionary"/> — key lookup</item>
+///   <item><see cref="ICollection"/> / <see cref="IEnumerable"/> — Count / Length</item>
+///   <item>Any POCO / anonymous type — reflection with compiled delegate cache</item>
+/// </list>
+///
+/// All property getters are cached per (Type, MemberName) so reflection only
+/// runs once per unique type+property combination.
 /// </summary>
 public sealed class PropertyResolver
 {
-    // (Type, MemberName) -> getter delegate; null means member not found
+    // Compiled getter cache: (Type, MemberName) → delegate | null-if-not-found
     private static readonly ConcurrentDictionary<(Type, string), Func<object, object?>?> _getterCache = new();
 
-    // Path string -> pre-split segment list; avoids re-splitting on every render
+    // Segment cache: path string → pre-split array, avoids re-splitting on every render
     private static readonly ConcurrentDictionary<string, (string Segment, bool NullSafe)[]> _segmentCache = new();
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── Public API ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Resolves <paramref name="path"/> against <paramref name="model"/>, throwing on failure.
+    /// Resolves <paramref name="path"/> against <paramref name="model"/>, throwing
+    /// <see cref="PropertyResolutionException"/> on failure.
     /// </summary>
     public object? Resolve(object? model, string path, int line = 0, int col = 0)
     {
-        if (TryResolve(model, path, out var value))
-            return value;
-        throw new PropertyResolutionException(path, line, col,
-            $"Could not resolve '{path}' on type '{model?.GetType().Name ?? "null"}'");
+        if (!TryResolve(model, path, out var value))
+            throw new PropertyResolutionException(path, line, col,
+                $"Could not resolve '{path}' on type '{model?.GetType().Name ?? "null"}'");
+        return value;
     }
 
     /// <summary>
     /// Attempts to resolve <paramref name="path"/> against <paramref name="model"/>.
-    /// Returns <c>false</c> — never throws — when the property does not exist.
+    /// Returns <c>false</c> — never throws — when the member does not exist.
     /// This is the zero-exception hot path used by the frame-walking loop.
     /// </summary>
     public bool TryResolve(object? model, string path, out object? value)
     {
         value = null;
-        if (model == null) return true;          // null model → null value (not an error)
+        if (model == null) return true;
         if (string.IsNullOrWhiteSpace(path)) { value = model; return true; }
 
         var segments = GetSegments(path);
@@ -52,7 +62,7 @@ public sealed class PropertyResolver
             if (current == null)
             {
                 if (nullSafe) { value = null; return true; }
-                return false;                     // non-null-safe path hit null — miss
+                return false;
             }
 
             if (!TryResolveSegment(current, segment, out current))
@@ -63,32 +73,40 @@ public sealed class PropertyResolver
         return true;
     }
 
-    // ── Segment resolution ────────────────────────────────────────────────────
+    // ── Per-segment resolution ─────────────────────────────────────────────────
 
     private bool TryResolveSegment(object obj, string segment, out object? result)
     {
         result = null;
-        var type = obj.GetType();
 
-        // Special members: Count / Length
+        // ── JsonElement ───────────────────────────────────────────────────────
+        if (obj is JsonElement je)
+            return TryResolveJsonElement(je, segment, out result);
+
+        // ── ExpandoObject / IDictionary<string,object?> ───────────────────────
+        if (obj is IDictionary<string, object?> expando)
+        {
+            if (expando.TryGetValue(segment, out result)) return true;
+            // case-insensitive fallback
+            foreach (var kv in expando)
+                if (string.Equals(kv.Key, segment, StringComparison.OrdinalIgnoreCase))
+                { result = kv.Value; return true; }
+            return false;
+        }
+
+        // ── Generic/non-generic dictionary ───────────────────────────────────
+        if (obj is IDictionary dict)
+        {
+            if (dict.Contains(segment)) { result = dict[segment]; return true; }
+            return false;
+        }
+
+        // ── Count / Length on collections ─────────────────────────────────────
         if (segment.Equals("Count", StringComparison.OrdinalIgnoreCase))
         {
             if (obj is string s) { result = s.Length; return true; }
             if (obj is ICollection col) { result = col.Count; return true; }
-            //if (obj is IEnumerable en) { result = en.Cast<object>().Count(); return true; }
-            if (obj is IReadOnlyCollection<object> roc)
-            {
-                result = roc.Count;
-                return true;
-            }
-
-            if (obj is IEnumerable en)
-            {
-                var list = en as IList ?? en.Cast<object>().ToList();
-
-                result = list.Count;
-                return true;
-            }
+            if (obj is IEnumerable en) { result = en.Cast<object>().Count(); return true; }
         }
         if (segment.Equals("Length", StringComparison.OrdinalIgnoreCase))
         {
@@ -96,121 +114,182 @@ public sealed class PropertyResolver
             if (obj is Array arr) { result = arr.Length; return true; }
         }
 
-        // Dictionary indexer
-        if (obj is IDictionary dict && dict.Contains(segment))
-        {
-            result = dict[segment];
-            return true;
-        }
-
-        // Cached property/field getter
-        var getter = _getterCache.GetOrAdd((type, segment), static key => BuildGetter(key.Item1, key.Item2));
+        // ── POCO / anonymous type via compiled delegate cache ─────────────────
+        var type = obj.GetType();
+        var getter = _getterCache.GetOrAdd((type, segment), static k => BuildGetter(k.Item1, k.Item2));
         if (getter == null) return false;
 
         result = getter(obj);
         return true;
     }
 
-    //private static Func<object, object?>? BuildGetter(Type type, string name)
-    //{
-    //    var prop = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-    //    if (prop != null)
-    //    {
-    //        var mi = prop.GetGetMethod()!;
-    //        return obj => mi.Invoke(obj, null);
-    //    }
+    // ── JsonElement resolution ─────────────────────────────────────────────────
 
-    //    var field = type.GetField(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-    //    if (field != null) return field.GetValue;
-
-    //    return null;
-    //}
-
-    // Perofrmance enhanced
-    private static Func<object, object?>? BuildGetter(Type type, string name)
+    private static bool TryResolveJsonElement(JsonElement je, string segment, out object? result)
     {
-        var prop = type.GetProperty(
-            name,
-            BindingFlags.Public |
-            BindingFlags.Instance |
-            BindingFlags.IgnoreCase);
+        result = null;
 
-        if (prop != null)
+        // Array length / object property count
+        if (segment.Equals("Count", StringComparison.OrdinalIgnoreCase) ||
+            segment.Equals("Length", StringComparison.OrdinalIgnoreCase))
         {
-            var objParam = Expression.Parameter(typeof(object), "obj");
-
-            var castObj = Expression.Convert(objParam, type);
-
-            var property = Expression.Property(castObj, prop);
-
-            var convertResult = Expression.Convert(
-                property,
-                typeof(object));
-
-            return Expression
-                .Lambda<Func<object, object?>>(
-                    convertResult,
-                    objParam)
-                .Compile();
+            if (je.ValueKind == JsonValueKind.Array)
+            { result = je.GetArrayLength(); return true; }
+            if (je.ValueKind == JsonValueKind.Object)
+            { result = je.EnumerateObject().Count(); return true; }
         }
 
-        var field = type.GetField(
-            name,
-            BindingFlags.Public |
-            BindingFlags.Instance |
-            BindingFlags.IgnoreCase);
+        // Numeric array index
+        if (je.ValueKind == JsonValueKind.Array && int.TryParse(segment, out var idx))
+        {
+            if (idx >= 0 && idx < je.GetArrayLength())
+            { result = UnwrapJsonElement(je[idx]); return true; }
+            return false;
+        }
 
+        // Object property lookup (case-insensitive)
+        if (je.ValueKind == JsonValueKind.Object &&
+            je.TryGetProperty(segment, out var child))
+        {
+            result = UnwrapJsonElement(child);
+            return true;
+        }
+
+        // Case-insensitive fallback for object properties
+        if (je.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in je.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, segment, StringComparison.OrdinalIgnoreCase))
+                { result = UnwrapJsonElement(prop.Value); return true; }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Converts a <see cref="JsonElement"/> leaf value to the closest .NET primitive
+    /// so formatters and comparisons work naturally downstream.
+    /// Non-leaf values (Object / Array) are returned as <see cref="JsonElement"/> so
+    /// nested path segments can keep resolving into them.
+    /// </summary>
+    private static object? UnwrapJsonElement(JsonElement el) => el.ValueKind switch
+    {
+        JsonValueKind.String => el.GetString(),
+        JsonValueKind.Number => el.TryGetInt64(out var l) ? (object)l
+                               : el.TryGetDouble(out var d) ? d
+                               : el.GetRawText(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Null => null,
+        _ => el   // Object or Array — keep as JsonElement for further navigation
+    };
+
+    // ── Reflection getter builder ──────────────────────────────────────────────
+
+    private static Func<object, object?>? BuildGetter(Type type, string name)
+    {
+        // Property — build a compiled expression tree delegate for near-native speed
+        var prop = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (prop != null)
+        {
+            try
+            {
+                var param = System.Linq.Expressions.Expression.Parameter(typeof(object), "o");
+                var cast = System.Linq.Expressions.Expression.Convert(param, type);
+                var access = System.Linq.Expressions.Expression.Property(cast, prop);
+                var boxed = System.Linq.Expressions.Expression.Convert(access, typeof(object));
+                return System.Linq.Expressions.Expression.Lambda<Func<object, object?>>(boxed, param).Compile();
+            }
+            catch
+            {
+                // Fallback to MethodInfo.Invoke if expression compilation fails (e.g. ref structs)
+                var mi = prop.GetGetMethod()!;
+                return obj => mi.Invoke(obj, null);
+            }
+        }
+
+        // Field
+        var field = type.GetField(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
         if (field != null)
         {
-            var objParam = Expression.Parameter(typeof(object));
-
-            var castObj = Expression.Convert(objParam, type);
-
-            var fieldExpr = Expression.Field(castObj, field);
-
-            var convertResult = Expression.Convert(
-                fieldExpr,
-                typeof(object));
-
-            return Expression
-                .Lambda<Func<object, object?>>(
-                    convertResult,
-                    objParam)
-                .Compile();
+            var param = System.Linq.Expressions.Expression.Parameter(typeof(object), "o");
+            var cast = System.Linq.Expressions.Expression.Convert(param, type);
+            var access = System.Linq.Expressions.Expression.Field(cast, field);
+            var boxed = System.Linq.Expressions.Expression.Convert(access, typeof(object));
+            return System.Linq.Expressions.Expression.Lambda<Func<object, object?>>(boxed, param).Compile();
         }
 
         return null;
     }
 
-    // ── Segment caching ───────────────────────────────────────────────────────
+    // ── Segment cache ──────────────────────────────────────────────────────────
 
     private static (string Segment, bool NullSafe)[] GetSegments(string path)
         => _segmentCache.GetOrAdd(path, static p => ParseSegments(p));
 
     private static (string Segment, bool NullSafe)[] ParseSegments(string path)
     {
-        var parts = path.Split('.');
-        var result = new List<(string, bool)>(parts.Length);
+        // Strip any leading ../ parent navigation — those are handled by EvalProperty
+        // before calling TryResolve, so they never reach segment parsing.
+        while (path.StartsWith("../", StringComparison.Ordinal))
+            path = path[3..];
 
-        foreach (var part in parts)
+        var result = new List<(string, bool)>(4);
+        int pos = 0;
+
+        while (pos < path.Length)
         {
-            if (part.EndsWith('?'))
+            // Find the next separator: '.' or '?.'
+            int dotPos = path.IndexOf('.', pos);
+            int nullSafePos = path.IndexOf("?.", pos, StringComparison.Ordinal);
+
+            if (dotPos == -1 && nullSafePos == -1)
             {
-                result.Add((part[..^1], true));
+                // Last segment, no more separators
+                result.Add((path[pos..], false));
+                break;
             }
-            else if (part.Contains("?."))
+
+            // Determine which separator comes first
+            bool useNullSafe;
+            int sepPos;
+            if (nullSafePos != -1 && (dotPos == -1 || nullSafePos < dotPos))
             {
-                var sub = part.Split("?.");
-                result.Add((sub[0], false));
-                for (int i = 1; i < sub.Length; i++)
-                    result.Add((sub[i], true));
+                useNullSafe = true;
+                sepPos = nullSafePos;
             }
             else
             {
-                result.Add((part, false));
+                useNullSafe = false;
+                sepPos = dotPos;
+            }
+
+            var segment = path[pos..sepPos];
+            if (segment.Length > 0)
+                result.Add((segment, false));
+
+            // Advance past separator
+            pos = sepPos + (useNullSafe ? 2 : 1);
+
+            // The segment AFTER a ?. separator is null-safe
+            if (useNullSafe && pos < path.Length)
+            {
+                // Find end of this null-safe segment
+                int nextDot = path.IndexOf('.', pos);
+                int nextNullSafe = path.IndexOf("?.", pos, StringComparison.Ordinal);
+                int end;
+                if (nextDot == -1 && nextNullSafe == -1) end = path.Length;
+                else if (nextNullSafe != -1 && (nextDot == -1 || nextNullSafe <= nextDot)) end = nextNullSafe;
+                else end = nextDot;
+
+                result.Add((path[pos..end], true));
+                pos = end;
+                if (pos < path.Length && path[pos] == '.') pos++; // skip plain dot after null-safe segment
             }
         }
 
-        return result.ToArray();   // array is faster to iterate than List<>
+        return result.ToArray();
     }
 }

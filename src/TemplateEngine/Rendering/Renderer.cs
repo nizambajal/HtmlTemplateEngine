@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text.Json;
 using System.Text;
 using System.Web;
 using TemplateEngine.Ast;
@@ -32,8 +33,7 @@ public sealed class Renderer
     /// <summary>Renders the document AST against the supplied context stack.</summary>
     public string Render(DocumentNode doc, ContextStack ctx)
     {
-        //var sb = new StringBuilder(4096);
-        var sb = new StringBuilder(Math.Min(doc.Children.Count * 64, 32768));
+        var sb = new StringBuilder(4096);
         RenderChildren(doc.Children, ctx, sb);
         return sb.ToString();
     }
@@ -159,6 +159,7 @@ public sealed class Renderer
         // Materialise count without allocating a second list when possible
         int count = collection switch
         {
+            JsonElement je when je.ValueKind == JsonValueKind.Array => je.GetArrayLength(),
             ICollection c => c.Count,
             string s => s.Length,
             _ => -1          // unknown — will be computed lazily
@@ -170,13 +171,28 @@ public sealed class Renderer
         if (count > 0)
         {
             int i = 0;
-            foreach (var item in (IEnumerable)collection)
+            // JsonElement arrays need special iteration
+            if (collection is JsonElement jsonArray && jsonArray.ValueKind == JsonValueKind.Array)
             {
-                var loopMeta = new LoopContext { Index = i, Count = count };
-                ctx.Push(item, node.Alias, loopMeta);
-                try { RenderChildren(node.Body, ctx, sb); }
-                finally { ctx.Pop(); }
-                i++;
+                foreach (var item in jsonArray.EnumerateArray())
+                {
+                    var loopMeta = new LoopContext { Index = i, Count = count };
+                    ctx.Push(item, node.Alias, loopMeta);
+                    try { RenderChildren(node.Body, ctx, sb); }
+                    finally { ctx.Pop(); }
+                    i++;
+                }
+            }
+            else
+            {
+                foreach (var item in (IEnumerable)collection)
+                {
+                    var loopMeta = new LoopContext { Index = i, Count = count };
+                    ctx.Push(item, node.Alias, loopMeta);
+                    try { RenderChildren(node.Body, ctx, sb); }
+                    finally { ctx.Pop(); }
+                    i++;
+                }
             }
         }
         else
@@ -194,20 +210,10 @@ public sealed class Renderer
         }
     }
 
-    //private static List<object?> MaterialiseList(object collection)
-    //{
-    //    var r = new List<object?>();
-    //    foreach (var item in (IEnumerable)collection) r.Add(item);
-    //    return r;
-    //}
-
-    private static IList MaterialiseList(object collection)
+    private static List<object?> MaterialiseList(object collection)
     {
-        if (collection is IList list)
-            return list;
-
-        return ((IEnumerable)collection)
-            .Cast<object>()
-            .ToArray();
+        var r = new List<object?>();
+        foreach (var item in (IEnumerable)collection) r.Add(item);
+        return r;
     }
 }
