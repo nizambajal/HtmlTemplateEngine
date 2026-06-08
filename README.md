@@ -269,3 +269,15 @@ Parallel.ForEach(requests, req =>
 
 - .NET 8.0+
 - No third-party runtime dependencies
+
+---
+
+## Support Development
+
+HtmlTemplateEngine is maintained in my spare time.
+
+If it saves you development time, consider supporting the project:
+
+☕ Ko-fi: https://ko-fi.com/yourusername
+
+Every contribution helps improve the package and fund future features.
