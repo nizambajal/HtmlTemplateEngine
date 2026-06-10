@@ -12,7 +12,7 @@
 		<Optimize Condition="'$(Configuration)' == 'Release'">true</Optimize>
 
 		<PackageId>Sniz.HtmlTemplateEngine</PackageId>
-		<Version>1.1.0</Version>
+		<Version>1.1.1</Version>
 		<Authors>Nizamuddien T I</Authors>
 		<Company>Sniz</Company>
 		<Description>
